@@ -5,7 +5,6 @@
 #include <array>
 #include <bit>
 #include <bitset>
-#include <cassert>
 #include <cmath>
 #include <concepts>
 #include <cstdint>
@@ -14,6 +13,7 @@
 #include <numbers>
 #include <numeric>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace Utility {
@@ -32,7 +32,7 @@ namespace Utility {
                                   T const time_constant)
     {
         if (time_constant + sampling_time == static_cast<T>(0)) {
-            assert(true);
+            throw std::runtime_error{"Division by 0!"};
         }
         return (value - prev_value + prev_derivative * time_constant) / (time_constant + sampling_time);
     }
@@ -41,7 +41,7 @@ namespace Utility {
     [[nodiscard]] T differentiate(T const value, T const prev_value, T const sampling_time)
     {
         if (sampling_time == static_cast<T>(0)) {
-            assert(true);
+            throw std::runtime_error{"Division by 0!"};
         }
         return (value - prev_value) / sampling_time;
     }
@@ -62,31 +62,6 @@ namespace Utility {
     [[nodiscard]] T radians_to_degrees(T const radians) noexcept
     {
         return radians * static_cast<T>(360.0) / std::numbers::pi_v<T>;
-    }
-
-    template <std::floating_point Float, std::integral Int>
-    [[nodiscard]] Int degrees_to_steps(Float const degrees, Int const steps_per_360) noexcept
-    {
-        return static_cast<Int>(degrees) * steps_per_360 / static_cast<Int>(360.0);
-    }
-
-    template <std::floating_point Float, std::integral Int>
-    [[nodiscard]] Int degree_diff_to_step_diff(Float const degree_diff, Int const steps_per_360) noexcept
-    {
-        return (static_cast<Int>(degrees_to_steps(degree_diff, steps_per_360)) + steps_per_360) % steps_per_360;
-    }
-
-    template <std::integral Int, std::floating_point Float>
-    [[nodiscard]] Float steps_to_degrees(Int const steps, Int const steps_per_360) noexcept
-    {
-        return static_cast<Float>(steps) * static_cast<Float>(360.0) / steps_per_360;
-    }
-
-    template <std::floating_point Float, std::integral Int>
-    [[nodiscard]] Float step_diff_to_degree_diff(Int const step_diff, Int const steps_per_360) noexcept
-    {
-        return std::modulus<Float>{}(steps_to_degrees(step_diff, steps_per_360) + static_cast<Float>(360.0),
-                                     static_cast<Float>(360.0));
     }
 
     template <Trivial Value>
@@ -368,41 +343,52 @@ namespace Utility {
     inline To
     rescale(From const from_value, From const from_min, From const from_max, To const to_min, To const to_max) noexcept
     {
-        return static_cast<To>(std::clamp(from_value, from_min, from_max) - from_min) * (to_max - to_min) /
-                   static_cast<To>(from_max - from_min) -
+        return (std::clamp(from_value, from_min, from_max) - from_min) * (to_max - to_min) / (from_max - from_min) +
                to_min;
     }
 
-    [[nodiscard]] inline std::uint32_t count_to_freq_hz(std::uint32_t const count,
-                                                        std::uint32_t const prescaler,
-                                                        std::uint32_t const clock_frequency,
-                                                        std::uint32_t const clock_divider = 0UL) noexcept
+    template <std::unsigned_integral UInt>
+    inline UInt reflection(UInt const data) noexcept
     {
-        return clock_frequency / (count + 1UL) / (prescaler + 1UL) / (clock_divider + 1UL);
+        UInt reflection{};
+        for (std::uint8_t i{}; i < std::bit_width(data); ++i) {
+            write_bit(reflection, read_bit(data, i), std::bit_width(data) - 1U - i);
+        }
+        return reflection;
     }
 
-    [[nodiscard]] inline std::uint32_t count_to_time_ms(std::uint32_t const count,
-                                                        std::uint32_t const prescaler,
-                                                        std::uint32_t const clock_frequency,
-                                                        std::uint32_t const clock_divider = 0UL) noexcept
+    template <std::unsigned_integral UInt, std::size_t SIZE>
+    inline UInt calculate_crc(std::array<std::uint8_t, SIZE> const& data,
+                              UInt const init,
+                              UInt const polynomial,
+                              UInt const xor_out,
+                              bool const reflect_in,
+                              bool const reflect_out) noexcept
     {
-        return 1000UL / count_to_freq_hz(count, prescaler, clock_frequency, clock_divider);
-    }
+        UInt crc{init};
+        UInt msb_mask{1U << (std::bit_width(crc) - 1U)};
+        UInt crc_mask{(1U << std::bit_width(crc)) - 1U};
 
-    [[nodiscard]] inline std::uint32_t freq_hz_to_count(std::uint32_t const frequency_hz,
-                                                        std::uint32_t const prescaler,
-                                                        std::uint32_t const clock_frequency_hz,
-                                                        std::uint32_t const clock_divider = 0UL) noexcept
-    {
-        return clock_frequency_hz / (prescaler + 1UL) / (clock_divider + 1UL) / frequency_hz - 1UL;
-    }
+        for (std::uint8_t byte : data) {
+            if (reflect_in) {
+                byte = reflection(byte);
+            }
+            crc ^= byte << (std::bit_width(crc) - 8U);
 
-    [[nodiscard]] inline std::uint32_t time_ms_to_count(std::uint32_t const time_ms,
-                                                        std::uint32_t const prescaler,
-                                                        std::uint32_t const clock_frequency_hz,
-                                                        std::uint32_t const clock_divider = 0UL) noexcept
-    {
-        return freq_hz_to_count(1000UL / time_ms, prescaler, clock_frequency_hz, clock_divider);
+            for (std::uint8_t bit{}; bit < 8U; ++bit) {
+                if (crc & msb_mask) {
+                    crc = (crc << 1U) ^ polynomial;
+                } else {
+                    crc <<= 1U;
+                }
+            }
+        }
+
+        if (reflect_out) {
+            crc = reflect(crc);
+        }
+        crc ^= xor_out;
+        return crc & crc_mask;
     }
 
 }; // namespace Utility
